@@ -157,6 +157,21 @@ def probe_rbac(rbac_api, namespace: str, service_account: str) -> RbacFacts:
     return facts
 
 
+def _all_containers(pod) -> list:
+    """Every container that runs in this pod — init and main.
+
+    initContainers are not a footnote: they run FIRST, often as root to do setup, and
+    a privileged one is a textbook escape vector. An earlier version walked only
+    `spec.containers`, so a privileged initContainer was reported as privileged=False
+    and the LLM was told the pod was clean. A false negative in the unsafe direction.
+    """
+    return list(
+        (getattr(pod.spec, "init_containers", None) or [])
+        + (getattr(pod.spec, "containers", None) or [])
+        + (getattr(pod.spec, "ephemeral_containers", None) or [])
+    )
+
+
 def probe_secrets(pod) -> list[str]:
     """Names of Secrets this pod can read. NAMES ONLY — never values.
 
@@ -164,7 +179,7 @@ def probe_secrets(pod) -> list[str]:
     The blast-radius argument needs "a Secret is mounted", never its contents.
     """
     names: list[str] = []
-    for container in pod.spec.containers or []:
+    for container in _all_containers(pod):
         for src in getattr(container, "env_from", None) or []:
             ref = getattr(src, "secret_ref", None)
             if ref is not None:
@@ -173,11 +188,20 @@ def probe_secrets(pod) -> list[str]:
             ref = getattr(getattr(env, "value_from", None), "secret_key_ref", None)
             if ref is not None:
                 names.append(ref.name)
+
     for volume in pod.spec.volumes or []:
         secret = getattr(volume, "secret", None)
         if secret is not None:
             names.append(secret.secret_name)
-    return sorted(set(names))
+        # Projected volumes nest their sources - a common way to mount credentials,
+        # and invisible if you only look at volume.secret.
+        projected = getattr(volume, "projected", None)
+        for source in (getattr(projected, "sources", None) or []) if projected else []:
+            ref = getattr(source, "secret", None)
+            if ref is not None:
+                names.append(getattr(ref, "name", None) or getattr(ref, "secret_name", None))
+
+    return sorted({n for n in names if n})
 
 
 def probe_exposure(core_api, namespace: str, selector: dict) -> ExposureFacts:
@@ -199,24 +223,50 @@ def probe_exposure(core_api, namespace: str, selector: dict) -> ExposureFacts:
 
 
 def probe_network_policy(net_api, namespace: str, labels: dict) -> bool:
-    """Is this pod covered by any NetworkPolicy?
+    """Is this pod's INGRESS restricted by a NetworkPolicy?
 
-    An empty podSelector ({}) selects every pod in the namespace — that is how a
-    default-deny is written, and it is why safe-demo ranks low.
+    Deliberately narrow, and the narrowness is the point. This answer feeds
+    "Covered by a NetworkPolicy" straight into the prompt, where True pushes severity
+    DOWN — so every over-claim here is a false negative on a security finding.
+
+    Two ways an earlier version over-claimed:
+      * An egress-only policy leaves ingress wide open. It was reported as covered.
+      * `match_labels` is None BOTH for an empty selector `{}` (default-deny: selects
+        every pod, correctly covered) AND for a matchExpressions selector (which may
+        select nothing at all). Both were treated as "selects everything".
+
+    We do not evaluate matchExpressions - we just refuse to assume it matches.
+    Unknown is not covered.
     """
     for policy in net_api.list_namespaced_network_policy(namespace).items:
-        match_labels = getattr(policy.spec.pod_selector, "match_labels", None)
-        if not match_labels:
-            return True  # empty selector = all pods
-        if _selector_matches(match_labels, labels):
+        policy_types = getattr(policy.spec, "policy_types", None) or ["Ingress"]
+        if "Ingress" not in policy_types:
+            continue  # egress-only: says nothing about who can reach this pod
+
+        selector = policy.spec.pod_selector
+        match_labels = getattr(selector, "match_labels", None)
+        match_expressions = getattr(selector, "match_expressions", None)
+
+        if not match_labels and not match_expressions:
+            return True  # a genuinely empty selector: every pod in the namespace
+        if match_labels and _selector_matches(match_labels, labels):
             return True
+        # matchExpressions present: we cannot cheaply prove it selects this pod, so we
+        # do not claim it does.
     return False
 
 
 def probe_workload_facts(pod) -> WorkloadFacts:
-    """Privileged containers and host filesystem mounts — the escape surface."""
+    """Privileged containers and host filesystem mounts.
+
+    NOT the whole escape surface — hostPID, hostNetwork and capabilities.add
+    (SYS_ADMIN, SYS_PTRACE) are all still unexamined. Trivy flags those per-resource,
+    so they reach the LLM via the findings; they just do not participate in the
+    blast-radius composition here. Do not read a clean result from this as "no escape
+    surface" — it means "not these two".
+    """
     facts = WorkloadFacts()
-    for container in pod.spec.containers or []:
+    for container in _all_containers(pod):
         sc = getattr(container, "security_context", None)
         if sc is not None and getattr(sc, "privileged", False):
             facts.privileged = True

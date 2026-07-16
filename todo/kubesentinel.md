@@ -260,11 +260,24 @@ about rather than the risks. Fixed test-first; suite grew 38 → 55.
 - [x] **MEDIUM-12 `RUNS` never evicted / LOW task GC.** Capped at `MAX_RUNS`; task
   reference retained.
 
+### Phase 6 — the two false negatives (2026-07-17) ✅
+Both failed in the *unsafe* direction, which is the wrong direction for this tool.
+
+- [x] **MEDIUM-8 initContainers / projected volumes were invisible.** `probe_secrets`
+  and `probe_workload_facts` walked only `spec.containers`. Added `_all_containers()`
+  (init + main + ephemeral) and projected-volume secret sources. **Verified live**: a
+  real Deployment with a non-privileged main container and a privileged initContainer
+  now reports `privileged: True`; before the fix it reported False.
+- [x] **MEDIUM-7 NetworkPolicy coverage over-claimed.** Egress-only policies and
+  `matchExpressions`-only selectors both reported "covered: True" — which pushes
+  severity DOWN. Now checks `policyTypes` for Ingress, and refuses to assume a
+  matchExpressions selector matches (unknown ≠ covered). **Verified live**: safe-demo's
+  default-deny still registers covered, so the LOW ranking is unchanged.
+
 ### Still open from the review (not fixed)
-- [ ] **MEDIUM-7 NetworkPolicy coverage is over-generous.** `matchExpressions`-only
-  selectors and egress-only policies both report "covered: True", pushing severity down.
-- [ ] **MEDIUM-8 initContainers / projected volumes invisible.** A privileged
-  initContainer reports `privileged: False`. Textbook escape vector, missed.
+- [ ] **`probe_workload_facts` still ignores hostPID / hostNetwork / capabilities.add.**
+  Now stated in the docstring rather than implied away — a clean result means "not
+  privileged and no hostPath", not "no escape surface".
 - [ ] **MEDIUM-10 probe requests are per-workload but applied to all** — N×N API calls,
   attribution lost.
 - [ ] **MEDIUM-11 "watch the graph think" oversells the stream.** `assess` emits one

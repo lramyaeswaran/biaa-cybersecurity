@@ -97,7 +97,7 @@ In a **GitHub Codespace** the same four commands work — port 8080 is forwarded
 automatically and kept **private** (the dashboard has no auth and reports exactly
 where your cluster is weakest; do not make it public).
 
-Run the tests: `pytest` (55 tests, no cluster or API key needed — everything is mocked).
+Run the tests: `pytest` (61 tests, no cluster or API key needed — everything is mocked).
 
 ### Running it locally instead (for iterating on the UI)
 

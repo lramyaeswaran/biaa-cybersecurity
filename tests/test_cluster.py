@@ -251,6 +251,109 @@ def test_default_deny_network_policy_covers_all_pods():
     assert cluster.probe_network_policy(net, "safe-demo", {"app": "reports-api"}) is True
 
 
+# --- Review finding MEDIUM-8: initContainers and projected volumes ---
+
+
+def _container(name, privileged=False, secret_env=(), ):
+    return SimpleNamespace(
+        name=name,
+        security_context=SimpleNamespace(privileged=privileged),
+        env_from=[SimpleNamespace(secret_ref=SimpleNamespace(name=s)) for s in secret_env],
+        env=None,
+        volume_mounts=[],
+    )
+
+
+def _pod_with_init(init_privileged=False, init_secret=(), main_privileged=False):
+    return SimpleNamespace(
+        spec=SimpleNamespace(
+            service_account_name="sa",
+            containers=[_container("api", privileged=main_privileged)],
+            init_containers=[_container("setup", privileged=init_privileged, secret_env=init_secret)],
+            volumes=[],
+        ),
+        metadata=SimpleNamespace(labels={}, name="p"),
+    )
+
+
+def test_privileged_init_container_is_detected():
+    """A privileged initContainer is a textbook escape vector. Walking only
+    spec.containers reported privileged=False and the LLM was told the pod was clean."""
+    facts = cluster.probe_workload_facts(_pod_with_init(init_privileged=True))
+    assert facts.privileged is True
+
+
+def test_secret_mounted_only_into_an_init_container_is_detected():
+    names = cluster.probe_secrets(_pod_with_init(init_secret=("bootstrap-creds",)))
+    assert names == ["bootstrap-creds"]
+
+
+def test_secret_in_a_projected_volume_is_detected():
+    pod = SimpleNamespace(
+        spec=SimpleNamespace(
+            service_account_name="sa",
+            containers=[_container("api")],
+            init_containers=None,
+            volumes=[
+                SimpleNamespace(
+                    name="creds",
+                    host_path=None,
+                    secret=None,
+                    projected=SimpleNamespace(
+                        sources=[SimpleNamespace(secret=SimpleNamespace(name="projected-creds"))]
+                    ),
+                )
+            ],
+        ),
+        metadata=SimpleNamespace(labels={}, name="p"),
+    )
+    assert cluster.probe_secrets(pod) == ["projected-creds"]
+
+
+# --- Review finding MEDIUM-7: NetworkPolicy coverage must not over-claim ---
+
+
+def _netpol(name, match_labels, policy_types):
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name),
+        spec=SimpleNamespace(
+            pod_selector=SimpleNamespace(match_labels=match_labels, match_expressions=None),
+            policy_types=policy_types,
+        ),
+    )
+
+
+def test_egress_only_policy_does_not_count_as_ingress_coverage():
+    """An egress-only policy leaves ingress wide open, but was reported as 'covered',
+    which pushes severity DOWN — a false negative in the unsafe direction."""
+    net = MagicMock()
+    net.list_namespaced_network_policy.return_value = SimpleNamespace(
+        items=[_netpol("egress-only", None, ["Egress"])]
+    )
+    assert cluster.probe_network_policy(net, "ns", {"app": "x"}) is False
+
+
+def test_matchexpressions_only_selector_is_not_assumed_to_select_everything():
+    """match_labels is None both for {} (default-deny, selects all) and for a
+    matchExpressions selector (may select nothing). Only the first means 'covered'."""
+    net = MagicMock()
+    pol = _netpol("expr", None, ["Ingress"])
+    pol.spec.pod_selector.match_expressions = [
+        SimpleNamespace(key="app", operator="In", values=["something-else"])
+    ]
+    net.list_namespaced_network_policy.return_value = SimpleNamespace(items=[pol])
+    assert cluster.probe_network_policy(net, "ns", {"app": "x"}) is False
+
+
+def test_true_default_deny_still_counts_as_covered():
+    """Regression guard: safe-demo must keep ranking LOW."""
+    net = MagicMock()
+    net.list_namespaced_network_policy.return_value = SimpleNamespace(
+        items=[_netpol("default-deny", None, ["Ingress"])]
+    )
+    assert cluster.probe_network_policy(net, "safe-demo", {"app": "reports-api"}) is True
+
+
 # --- Workload facts from the pod spec ---
 
 
