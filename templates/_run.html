@@ -1,0 +1,37 @@
+{# Swapped in when a scan starts. Streams node transitions, then loads the report. #}
+<section class="run" data-run-id="{{ run_id }}">
+  <h2>Scanning {{ namespaces | join(", ") }}</h2>
+
+  <ol id="steps-{{ run_id }}" class="steps"></ol>
+
+  <div id="report-{{ run_id }}"></div>
+</section>
+
+<script>
+  (function () {
+    const runId = "{{ run_id }}";
+    const steps = document.getElementById("steps-" + runId);
+    const source = new EventSource("/runs/" + runId + "/events");
+
+    // Each node transition arrives as "node|message" while the graph is running.
+    // This is the point of the SSE stream: the audience watches the agent think.
+    source.addEventListener("step", function (e) {
+      const sep = e.data.indexOf("|");
+      const node = e.data.slice(0, sep);
+      const message = e.data.slice(sep + 1);
+      const li = document.createElement("li");
+      const b = document.createElement("b");
+      b.textContent = node;
+      const span = document.createElement("span");
+      span.textContent = message;   // textContent, never innerHTML: this text is untrusted
+      li.appendChild(b);
+      li.appendChild(span);
+      steps.appendChild(li);
+    });
+
+    source.addEventListener("done", function () {
+      source.close();
+      htmx.ajax("GET", "/runs/" + runId + "/report", "#report-" + runId);
+    });
+  })();
+</script>

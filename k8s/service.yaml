@@ -1,0 +1,18 @@
+# NodePort 30080 is mapped to hostPort 8080 by k8s/kind-cluster.yaml.
+# Locally that is http://localhost:8080.
+# In a Codespace, port 8080 is auto-forwarded to an HTTPS URL — kept PRIVATE by
+# .devcontainer/devcontainer.json, because this dashboard has no authentication.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubesentinel
+  namespace: kubesentinel
+spec:
+  type: NodePort
+  selector:
+    app: kubesentinel
+  ports:
+    - port: 80
+      targetPort: 8000
+      nodePort: 30080

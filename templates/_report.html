@@ -1,0 +1,41 @@
+{# The ranking. Jinja2 autoescaping is what keeps attacker-controlled names inert. #}
+{% if error %}
+  <div class="error">
+    <strong>Scan failed:</strong> {{ error }}
+  </div>
+{% endif %}
+
+{% if assessments %}
+  <h3>Ranked by blast radius</h3>
+  <p class="hint">
+    The scanner graded every finding on one resource in isolation. The
+    <em>context facts</em> below appear in none of its output — they are why this
+    ordering differs.
+  </p>
+
+  {% for a in assessments %}
+    <article class="assessment sev-{{ a.severity | lower }}">
+      <header>
+        <span class="badge">{{ a.severity }}</span>
+        <h4>{{ a.workload }}</h4>
+      </header>
+
+      <p class="blast"><strong>Blast radius:</strong> {{ a.blast_radius }}</p>
+      <p class="rationale">{{ a.rationale }}</p>
+
+      <details open>
+        <summary>Context facts that drove this ranking</summary>
+        <ul class="facts">
+          {% for f in a.cited_facts %}<li>{{ f }}</li>{% endfor %}
+        </ul>
+      </details>
+
+      <details>
+        <summary>Suggested fix — <em>not applied</em></summary>
+        <pre><code>{{ a.remediation }}</code></pre>
+      </details>
+    </article>
+  {% endfor %}
+{% elif not error %}
+  <p>No workloads assessed.</p>
+{% endif %}

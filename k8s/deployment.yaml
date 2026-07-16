@@ -1,0 +1,86 @@
+# KubeSentinel itself.
+#
+# Hardened on purpose: this app flags privileged containers and cluster-admin
+# bindings for a living, so it should survive its own scan. Point KubeSentinel at
+# the `kubesentinel` namespace during the workshop — it ranks itself LOW, and that
+# is a better argument than any slide.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubesentinel
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesentinel
+  namespace: kubesentinel
+  labels:
+    app: kubesentinel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubesentinel
+  template:
+    metadata:
+      labels:
+        app: kubesentinel
+    spec:
+      serviceAccountName: kubesentinel
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: kubesentinel:latest
+          imagePullPolicy: Never   # image comes from `kind load`, not a registry
+          ports:
+            - containerPort: 8000
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false   # trivy writes a policy cache under $HOME
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: LLM_PROVIDER
+              valueFrom:
+                secretKeyRef:
+                  name: kubesentinel-secret
+                  key: LLM_PROVIDER
+            - name: GROQ_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kubesentinel-secret
+                  key: GROQ_API_KEY
+                  optional: true
+            - name: OLLAMA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kubesentinel-secret
+                  key: OLLAMA_API_KEY
+                  optional: true
+            - name: SCAN_NAMESPACES
+              value: "vuln-demo,safe-demo"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 20

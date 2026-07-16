@@ -1,0 +1,94 @@
+# safe-demo — the contrast case.
+#
+# Deliberately similar to vuln-demo (same job, an nginx that serves HTTP) but
+# hardened. Its purpose is to prove KubeSentinel *discriminates*: a ranker that
+# just echoes the scanner will flag both. A ranker that reasons about context
+# will rank this low, because nothing here compounds:
+#   non-root  +  no RBAC  +  no secrets  +  ClusterIP only  +  default-deny netpol
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: safe-demo
+  labels:
+    kubesentinel.io/demo: "hardened"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: reports-sa
+  namespace: safe-demo
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reports-api
+  namespace: safe-demo
+  labels:
+    app: reports-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reports-api
+  template:
+    metadata:
+      labels:
+        app: reports-api
+    spec:
+      serviceAccountName: reports-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: nginxinc/nginx-unprivileged:1.27-alpine
+          securityContext:
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: cache
+              mountPath: /tmp
+      volumes:
+        - name: cache
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: reports-api
+  namespace: safe-demo
+spec:
+  type: ClusterIP
+  selector:
+    app: reports-api
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+# Default-deny ingress: this pod is not reachable from arbitrary sources.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: safe-demo
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress

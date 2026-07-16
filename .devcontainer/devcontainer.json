@@ -1,0 +1,54 @@
+{
+  "name": "KubeSentinel",
+  "image": "mcr.microsoft.com/devcontainers/python:3.13-bookworm",
+
+  "features": {
+    // docker-in-docker is what lets kind run inside the Codespace.
+    // Pinned: kind < 0.32 breaks on Docker 27+ with a misleading
+    // "Reached target Multi-User System" error, and the docker-in-docker
+    // feature's IPv6 defaults changed in the same window. Leave these pinned
+    // unless you have re-tested `bash k8s/setup-cluster.sh` end to end.
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {
+      "version": "latest",
+      "moby": true,
+      "dockerDashComposeVersion": "v2"
+    },
+    "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+      "version": "1.31",
+      "helm": "latest",
+      "minikube": "none"
+    }
+  },
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  "forwardPorts": [8080],
+  "portsAttributes": {
+    "8080": {
+      "label": "KubeSentinel dashboard",
+      // PRIVATE on purpose. The dashboard has no authentication and reports
+      // exactly where a cluster is weakest. Do not make this public.
+      "visibility": "private",
+      "onAutoForward": "notify"
+    }
+  },
+
+  "hostRequirements": {
+    // kind's control plane plus the demo workloads need real headroom.
+    "cpus": 4,
+    "memory": "8gb",
+    "storage": "32gb"
+  },
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-kubernetes-tools.vscode-kubernetes-tools",
+        "redhat.vscode-yaml"
+      ]
+    }
+  },
+
+  "remoteUser": "vscode"
+}

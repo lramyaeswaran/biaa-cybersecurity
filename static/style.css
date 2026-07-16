@@ -1,0 +1,207 @@
+/* KubeSentinel — sized and contrasted for a projector at the back of a room. */
+
+:root {
+  --bg: #0f1115;
+  --panel: #171a21;
+  --border: #262b36;
+  --text: #e6e9ef;
+  --muted: #9aa3b2;
+  --accent: #4da3ff;
+  --critical: #ff4d4f;
+  --high: #ff8c42;
+  --medium: #ffc53d;
+  --low: #52c41a;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2rem 1.5rem 4rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  max-width: 68rem;
+  margin-inline: auto;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 2rem;
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  margin: 0.4rem 0 0;
+  color: var(--muted);
+  max-width: 46rem;
+}
+
+.provider {
+  margin: 0.6rem 0 0;
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.provider strong { color: var(--accent); }
+
+/* --- Form --- */
+
+form {
+  margin: 2rem 0 1.5rem;
+  padding: 1.25rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+input[type="text"] {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.6rem 0.75rem;
+  border-radius: 6px;
+  min-width: 22rem;
+  font-size: 1rem;
+}
+
+button {
+  background: var(--accent);
+  color: #06121f;
+  border: 0;
+  padding: 0.65rem 1.25rem;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+button:hover { filter: brightness(1.1); }
+
+/* --- Live step stream --- */
+
+.steps {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.85rem;
+}
+
+.steps li {
+  padding: 0.4rem 0.75rem;
+  border-left: 2px solid var(--accent);
+  background: var(--panel);
+  margin-bottom: 2px;
+  display: flex;
+  gap: 0.75rem;
+}
+
+.steps li b {
+  color: var(--accent);
+  min-width: 9rem;
+}
+
+.steps li span { color: var(--muted); }
+
+/* --- Assessments --- */
+
+.hint {
+  color: var(--muted);
+  font-size: 0.9rem;
+  max-width: 46rem;
+}
+
+.assessment {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  margin-bottom: 1rem;
+}
+
+.assessment header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.assessment h4 {
+  margin: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 1.05rem;
+}
+
+.badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 0.2rem 0.5rem;
+  border-radius: 4px;
+  color: #06121f;
+}
+
+.sev-critical { border-left-color: var(--critical); }
+.sev-critical .badge { background: var(--critical); color: #fff; }
+.sev-high { border-left-color: var(--high); }
+.sev-high .badge { background: var(--high); }
+.sev-medium { border-left-color: var(--medium); }
+.sev-medium .badge { background: var(--medium); }
+.sev-low { border-left-color: var(--low); }
+.sev-low .badge { background: var(--low); }
+
+.blast { margin: 0.75rem 0 0.5rem; }
+.rationale { color: var(--muted); margin: 0 0 0.75rem; }
+
+details { margin-top: 0.5rem; }
+
+summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--accent);
+}
+
+.facts {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  overflow-x: auto;
+  font-size: 0.85rem;
+}
+
+.error {
+  background: #2a1215;
+  border: 1px solid var(--critical);
+  color: #ffb3b3;
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+}
+
+footer {
+  margin-top: 3rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.85rem;
+}

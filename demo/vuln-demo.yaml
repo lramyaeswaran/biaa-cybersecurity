@@ -1,0 +1,103 @@
+# vuln-demo — deliberately misconfigured workloads.
+#
+# This namespace exists to give KubeSentinel something real to find.
+# It is seeded into a local kind cluster only. Never apply this anywhere else.
+#
+# The point of the demo is NOT that these are bad (every scanner says so).
+# The point is that this pod is bad *in a way that compounds*:
+#   privileged  +  cluster-admin SA  +  real credentials mounted  +  reachable
+# ...which is what KubeSentinel reasons about and a scanner cannot.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vuln-demo
+  labels:
+    kubesentinel.io/demo: "vulnerable"
+---
+# A service account bound to cluster-admin. Nothing here needs this.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: payments-sa
+  namespace: vuln-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: payments-sa-cluster-admin
+subjects:
+  - kind: ServiceAccount
+    name: payments-sa
+    namespace: vuln-demo
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+---
+# Fake cloud credentials. Values are obviously bogus, but the *shape* is real:
+# a scanner sees "a Secret is mounted"; the blast radius comes from what it is.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: cloud-credentials
+  namespace: vuln-demo
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: "AKIAIOSFODNN7EXAMPLE"
+  AWS_SECRET_ACCESS_KEY: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payments-api
+  namespace: vuln-demo
+  labels:
+    app: payments-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payments-api
+  template:
+    metadata:
+      labels:
+        app: payments-api
+    spec:
+      serviceAccountName: payments-sa
+      hostNetwork: false
+      containers:
+        - name: api
+          image: nginx:1.27-alpine
+          securityContext:
+            privileged: true                  # container escape surface
+            runAsUser: 0                      # root
+            allowPrivilegeEscalation: true
+          envFrom:
+            - secretRef:
+                name: cloud-credentials       # creds reachable to a shell in this pod
+          volumeMounts:
+            - name: host-root
+              mountPath: /host                # host filesystem mounted into the pod
+          # no resource limits on purpose
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory
+---
+# NodePort: reachable from outside the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: payments-api
+  namespace: vuln-demo
+spec:
+  type: NodePort
+  selector:
+    app: payments-api
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30081
+# ...and no NetworkPolicy in this namespace, so nothing is restricted.

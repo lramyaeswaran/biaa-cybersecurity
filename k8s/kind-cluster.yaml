@@ -1,0 +1,19 @@
+# KubeSentinel demo cluster.
+# Named distinctly so it never collides with other kind clusters on the box.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kubesentinel
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      # App reachable on localhost:8080 -> NodePort 30080.
+      # In a Codespace this port is auto-forwarded to a public HTTPS URL.
+      - containerPort: 30080
+        hostPort: 8080
+        protocol: TCP

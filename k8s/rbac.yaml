@@ -1,0 +1,68 @@
+# KubeSentinel's own permissions.
+#
+# This is the manifest to read aloud in the workshop. The app's entire "we cannot
+# change your cluster" guarantee is this file: there is no create, update, patch,
+# delete, or exec verb anywhere below. The guarantee is enforced by the API server,
+# not by the app's good intentions or by a prompt telling the LLM to behave.
+#
+# `secrets` is get/list because Trivy and the context probes need to know a Secret
+# EXISTS and what type it is. The app never puts Secret values in a prompt — see
+# cluster.probe_secrets, which takes a pod spec and has no API client to read data with.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubesentinel
+  namespace: kubesentinel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubesentinel-readonly
+rules:
+  - apiGroups: [""]
+    resources:
+      - pods
+      - services
+      - serviceaccounts
+      - secrets
+      - configmaps
+      - namespaces
+      - nodes
+      - persistentvolumes
+      - persistentvolumeclaims
+      - replicationcontrollers
+      - limitranges
+      - resourcequotas
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubesentinel-readonly
+subjects:
+  - kind: ServiceAccount
+    name: kubesentinel
+    namespace: kubesentinel
+roleRef:
+  kind: ClusterRole
+  name: kubesentinel-readonly
+  apiGroup: rbac.authorization.k8s.io
