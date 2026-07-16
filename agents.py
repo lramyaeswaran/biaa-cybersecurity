@@ -3,9 +3,12 @@
 The graph:
 
     START -> ingest -> gather_context -> assess -> report -> END
-                            ^              |
-                            |   needs a deeper probe? (max 2 rounds)
-                            +--- deep_probe <-+
+               |            |              ^  |
+               |            |              |  | needs a deeper probe?
+               |            |              +- deep_probe   (at most once)
+               |            |
+               +------------+--> report      scan failed / cluster unreachable:
+                                             say so, never rank without context
 
 Where the intelligence actually is, and where it deliberately is not:
 
@@ -34,7 +37,11 @@ log = logging.getLogger("kubesentinel.agents")
 
 # The LLM may request these and nothing else. See test_probe_whitelist_rejects_unknown_probe.
 ALLOWED_PROBES = {"role_verbs", "namespace_peers", "secret_types"}
-MAX_PROBE_ROUNDS = 2
+
+# Counts `assess` invocations, not deep_probe runs. 2 assess passes => at most ONE
+# deep_probe between them. Named for what it counts: an earlier `MAX_PROBE_ROUNDS = 2`
+# read as "two probe rounds" everywhere including the diagram, and delivered one.
+MAX_ASSESS_ROUNDS = 2
 
 
 # --- State ---
@@ -112,13 +119,25 @@ def ingest(state: ScanState) -> dict:
     """Run the scanner and group its findings by workload."""
     ts = datetime.now().strftime("%H:%M:%S")
     namespaces = state["namespaces"]
-    findings = scanner.scan(namespaces)
+
+    # A scan that could not run must never look like a scan that found nothing.
+    # Fail closed and say so - see scanner.ScannerError.
+    try:
+        findings = scanner.scan(namespaces)
+    except scanner.ScannerError as e:
+        log.error("ingest: scan failed: %s", e)
+        return {
+            "findings": [],
+            "workloads": [],
+            "error": str(e),
+            "audit": [f"[{ts}] ingest: SCAN FAILED - {e}"],
+        }
 
     if not findings:
         return {
             "findings": [],
             "workloads": [],
-            "audit": [f"[{ts}] ingest: no findings for {', '.join(namespaces)}"],
+            "audit": [f"[{ts}] ingest: scan ran, no findings for {', '.join(namespaces)}"],
         }
 
     grouped = scanner.group_by_workload(findings)
@@ -176,6 +195,7 @@ def assess(state: ScanState) -> dict:
     assessments: list[dict] = []
     probe_requests: list[str] = []
     skipped: list[str] = []
+    errors: list[str] = []
 
     for w in state["workloads"]:
         key = f"{w['namespace']}/{w['name']}"
@@ -189,12 +209,13 @@ def assess(state: ScanState) -> dict:
         try:
             result = model.invoke(prompt)
         except Exception as e:
+            # Record and carry on. Returning here would discard every workload already
+            # assessed - so one transient 429 on the last workload would delete the
+            # CRITICAL we just found on the first. Groq rate limits are a live-workshop
+            # certainty, not a hypothetical.
             log.error("assess failed for %s: %s", key, e)
-            return {
-                "assessments": [],
-                "error": str(e),
-                "audit": [f"[{ts}] assess error: {e}"],
-            }
+            errors.append(f"{key}: {e}")
+            continue
 
         # A weaker model can return None here instead of raising - it answered, just
         # not in the schema. Skip that workload rather than take the whole run down.
@@ -210,10 +231,13 @@ def assess(state: ScanState) -> dict:
     summary = ", ".join(f"{a['workload']}={a['severity']}" for a in ranked)
     if skipped:
         summary += f" ({len(skipped)} skipped: no valid assessment from the model)"
+    if errors:
+        summary += f" ({len(errors)} failed: {errors[0][:80]})"
     return {
         "assessments": ranked,
         "probe_requests": probe_requests,
         "probe_rounds": state.get("probe_rounds", 0) + 1,
+        "error": "; ".join(errors),
         "audit": [f"[{ts}] assess: {summary or 'no valid assessment returned'}"],
     }
 
@@ -291,9 +315,23 @@ def report(state: ScanState) -> dict:
 # --- Routing ---
 
 
+def route_after_context(state: ScanState) -> str:
+    """Bail out to report if we could not gather context.
+
+    Without context there is nothing here that a scanner does not already give you.
+    Running `assess` anyway hands the LLM an empty context block while the schema
+    still demands cited_facts - so it invents them, and the app silently degrades
+    into the exact "LLM guesses from scanner output" behaviour it exists to disprove.
+    An honest failure beats a confident fabrication.
+    """
+    if state.get("error"):
+        return "report"
+    return "assess"
+
+
 def route_after_assess(state: ScanState) -> str:
-    """Loop back for more context only if asked, and only twice."""
-    if state.get("probe_rounds", 0) >= MAX_PROBE_ROUNDS:
+    """Loop back for more context only if asked, and only up to the cap."""
+    if state.get("probe_rounds", 0) >= MAX_ASSESS_ROUNDS:
         return "report"
     if state.get("probe_requests"):
         return "deep_probe"
@@ -334,7 +372,8 @@ def _format_context(ctx: dict) -> str:
     lines = [
         f"  ServiceAccount: {ctx.get('service_account')}",
         f"  RBAC bindings: {ctx.get('rbac_bindings') or 'none'}",
-        f"  Holds cluster-admin: {ctx.get('is_cluster_admin')}",
+        f"  Holds cluster-admin (resolved from the role's RULES, not its name): {ctx.get('is_cluster_admin')}",
+        f"  Holds broad write RBAC: {ctx.get('has_privileged_rbac')}",
         f"  Mounted secrets (names only): {ctx.get('mounted_secrets') or 'none'}",
         f"  Network exposure: {ctx.get('exposure_summary')}",
         f"  Reachable from outside cluster: {ctx.get('reachable_externally')}",
@@ -342,6 +381,12 @@ def _format_context(ctx: dict) -> str:
         f"  Privileged container: {ctx.get('privileged')}",
         f"  Host paths mounted: {ctx.get('host_paths') or 'none'}",
     ]
+    # Unknown is not the same as safe. Tell the model what we could not resolve so it
+    # can hedge, rather than letting a silent False read as "verified clean".
+    if ctx.get("unresolved_roles"):
+        lines.append(
+            f"  ROLES WE COULD NOT READ (treat as unknown, NOT as safe): {ctx['unresolved_roles']}"
+        )
     for extra in ("role_verbs", "namespace_peers", "secret_types"):
         if extra in ctx:
             lines.append(f"  {extra}: {ctx[extra]}")
@@ -362,8 +407,19 @@ def build_graph() -> StateGraph:
     graph.add_node("report", report)
 
     graph.add_edge(START, "ingest")
-    graph.add_edge("ingest", "gather_context")
-    graph.add_edge("gather_context", "assess")
+
+    # Bail straight to report if the scan itself failed - there is nothing to contextualise.
+    graph.add_conditional_edges("ingest", route_after_context, {
+        "assess": "gather_context",
+        "report": "report",
+    })
+
+    # ...and again if the cluster was unreachable. Without context this app has no
+    # claim to make, so it must not make one anyway.
+    graph.add_conditional_edges("gather_context", route_after_context, {
+        "assess": "assess",
+        "report": "report",
+    })
 
     graph.add_conditional_edges("assess", route_after_assess, {
         "deep_probe": "deep_probe",

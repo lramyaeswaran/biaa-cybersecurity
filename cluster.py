@@ -10,10 +10,25 @@ answers live in *other objects*:
     Is anything restricting its traffic?                  -> NetworkPolicy
 
 Every call here is get/list. The ClusterRole in k8s/rbac.yaml grants nothing else,
-so "read-only" is enforced by the cluster rather than by this comment.
+so "cannot change the cluster" is enforced by the API server rather than by this
+comment.
 
-SECRET VALUES ARE NEVER READ. probe_secrets sees only the pod spec, which carries
-Secret *references*. Secret material must never reach an LLM prompt.
+SECRETS — the honest version
+----------------------------
+`probe_secrets` takes a pod spec and no API client, so it cannot read Secret data
+even if someone tried. That part is structural.
+
+`probe_secret_types` is NOT. It holds a CoreV1Api and calls read_namespaced_secret,
+which returns the whole Secret object — `.data` included — over the wire and into
+this process's memory. We extract `.type` and drop the rest, so no secret value ever
+reaches a prompt, but the guarantee there is *discipline, not architecture*. An
+earlier version of this docstring claimed secret values were "never read", which was
+false. If you add a field to that function, you are one attribute access away from
+putting credentials in an LLM prompt.
+
+Mitigation: rbac.yaml grants `get` on secrets, not `list`, so this app cannot
+enumerate every Secret (and therefore every ServiceAccount token) in the cluster.
+It can only fetch ones a scanned pod already references.
 """
 
 import logging
@@ -27,7 +42,12 @@ log = logging.getLogger("kubesentinel.cluster")
 @dataclass
 class RbacFacts:
     bindings: list[str] = field(default_factory=list)
+    # Cluster-scoped and grants everything: compromise here is total.
     is_cluster_admin: bool = False
+    # Broad write power short of full cluster-admin (admin/edit, wildcard verbs).
+    is_privileged_rbac: bool = False
+    # Roles we could not read. NOT the same as "safe" - say so rather than imply clean.
+    unresolved: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -42,7 +62,11 @@ class WorkloadFacts:
     host_paths: list[str] = field(default_factory=list)
 
 
-# Roles that mean "game over" if the pod holding them is compromised.
+# Built-in roles that mean "game over" if the pod holding them is compromised.
+# NOTE: this is a shortcut for the well-known names, NOT the test. The real test is
+# _role_grants_everything(), which reads the role's rules — because a custom
+# ClusterRole granting */*/* under a boring name like "platform-operator" is
+# cluster-admin in all but label, and real clusters are full of those.
 ADMIN_ROLES = {"cluster-admin", "admin", "edit"}
 
 
@@ -58,12 +82,34 @@ def load_clients():
 # --- Probes ---
 
 
+def _role_grants_everything(role) -> bool:
+    """Does this role's rule set amount to '*' on '*' in '*'?"""
+    for rule in getattr(role, "rules", None) or []:
+        verbs = set(getattr(rule, "verbs", None) or [])
+        resources = set(getattr(rule, "resources", None) or [])
+        groups = set(getattr(rule, "api_groups", None) or [])
+        if "*" in verbs and "*" in resources and ("*" in groups or "" in groups):
+            return True
+    return False
+
+
+def _read_role(rbac_api, kind: str, name: str, namespace: str):
+    if kind == "ClusterRole":
+        return rbac_api.read_cluster_role(name)
+    return rbac_api.read_namespaced_role(name, namespace)
+
+
 def probe_rbac(rbac_api, namespace: str, service_account: str) -> RbacFacts:
-    """What can this ServiceAccount do cluster-wide?
+    """What can this ServiceAccount actually do?
 
     This is the fact that most often turns a MEDIUM into a CRITICAL, and it is
     invisible to a per-resource scanner: the binding is a separate object that does
     not mention the Deployment at all.
+
+    We resolve each binding to its ROLE'S RULES rather than trusting the role's name.
+    An earlier version only string-matched {cluster-admin, admin, edit}, which reported
+    "Holds cluster-admin: False" for any custom ClusterRole granting */*/* — a false
+    negative on this app's headline fact, on exactly the roles real clusters accumulate.
     """
     facts = RbacFacts()
 
@@ -74,16 +120,39 @@ def probe_rbac(rbac_api, namespace: str, service_account: str) -> RbacFacts:
             and getattr(subject, "namespace", None) == namespace
         )
 
+    def _classify(role_ref, ref_label: str, cluster_scoped: bool) -> None:
+        by_name = role_ref.name in ADMIN_ROLES
+        if by_name:
+            facts.is_privileged_rbac = True
+            if cluster_scoped and role_ref.name == "cluster-admin":
+                facts.is_cluster_admin = True
+
+        try:
+            role = _read_role(rbac_api, role_ref.kind, role_ref.name, namespace)
+        except Exception as e:
+            # Could not read it -> we do not know. Never silently treat that as safe.
+            log.warning("could not resolve %s: %s", ref_label, e)
+            facts.unresolved.append(ref_label)
+            return
+
+        if _role_grants_everything(role):
+            facts.is_privileged_rbac = True
+            if cluster_scoped:
+                facts.is_cluster_admin = True
+
     for binding in rbac_api.list_cluster_role_binding().items:
         if any(_matches(s) for s in (binding.subjects or [])):
             ref = f"{binding.role_ref.kind}/{binding.role_ref.name}"
             facts.bindings.append(ref)
-            if binding.role_ref.name in ADMIN_ROLES:
-                facts.is_cluster_admin = True
+            _classify(binding.role_ref, ref, cluster_scoped=True)
 
     for binding in rbac_api.list_namespaced_role_binding(namespace).items:
         if any(_matches(s) for s in (binding.subjects or [])):
-            facts.bindings.append(f"{binding.role_ref.kind}/{binding.role_ref.name} (ns:{namespace})")
+            ref = f"{binding.role_ref.kind}/{binding.role_ref.name}"
+            facts.bindings.append(f"{ref} (ns:{namespace})")
+            # A RoleBinding grants power only inside this namespace, however broad the
+            # ClusterRole it points at. That is why this is not cluster_scoped.
+            _classify(binding.role_ref, ref, cluster_scoped=False)
 
     return facts
 
@@ -187,11 +256,17 @@ def probe_namespace_peers(apps_api, namespace: str) -> list[str]:
 
 
 def probe_secret_types(core_api, namespace: str, secret_names: list[str]) -> dict:
-    """Secret *types*, never data. A kubernetes.io/service-account-token differs from an opaque blob."""
+    """Secret types. A kubernetes.io/service-account-token differs from an opaque blob.
+
+    CAUTION: read_namespaced_secret returns the FULL Secret, `.data` included. We take
+    `.type` and discard the rest, but the secret body does cross the wire and sit in
+    memory. Do not widen what this returns. See the module docstring.
+    """
     types: dict[str, str] = {}
     for name in secret_names:
         try:
-            types[name] = core_api.read_namespaced_secret(name, namespace).type
+            secret = core_api.read_namespaced_secret(name, namespace)
+            types[name] = secret.type  # .type ONLY - never .data
         except Exception as e:
             log.warning("could not read type of secret %s: %s", name, e)
     return types
@@ -220,6 +295,8 @@ def get_workload_context(clients, namespace: str, name: str) -> dict:
         "service_account": service_account,
         "rbac_bindings": rbac_facts.bindings,
         "is_cluster_admin": rbac_facts.is_cluster_admin,
+        "has_privileged_rbac": rbac_facts.is_privileged_rbac,
+        "unresolved_roles": rbac_facts.unresolved,
         "mounted_secrets": probe_secrets(pod_template),
         "exposure_summary": exposure.summary,
         "reachable_externally": exposure.reachable_externally,

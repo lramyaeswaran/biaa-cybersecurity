@@ -18,6 +18,17 @@ log = logging.getLogger("kubesentinel.scanner")
 TRIVY_TIMEOUT_SECONDS = 120
 
 
+class ScannerError(RuntimeError):
+    """The scan did not run. Distinct from "the scan ran and found nothing".
+
+    This distinction is the entire point of the exception. An earlier version caught
+    every Trivy failure and returned an empty list, which the UI rendered as
+    "No workloads assessed" - byte-identical to a clean cluster. A security tool that
+    reports "clean" when it actually crashed is worse than one that reports nothing.
+    Fail closed; let the caller say so out loud.
+    """
+
+
 @dataclass
 class Finding:
     """One Trivy misconfiguration, as it applies to one resource."""
@@ -58,7 +69,7 @@ def run_trivy(namespaces: list[str]) -> dict:
         cmd, capture_output=True, text=True, timeout=TRIVY_TIMEOUT_SECONDS
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"trivy exited {proc.returncode}: {proc.stderr.strip()[:300]}")
+        raise ScannerError(f"trivy exited {proc.returncode}: {proc.stderr.strip()[:300]}")
     return json.loads(proc.stdout)
 
 
@@ -104,9 +115,16 @@ def group_by_workload(findings: list[Finding]) -> dict[tuple[str, str, str], lis
 
 
 def scan(namespaces: list[str]) -> list[Finding]:
-    """Scan and parse. A Trivy failure yields no findings rather than an exception."""
+    """Scan and parse.
+
+    Raises ScannerError if the scan could not run. Returns [] only when the scan ran
+    and genuinely found nothing - those two outcomes must never look the same.
+    """
     try:
-        return parse_findings(run_trivy(namespaces))
+        raw = run_trivy(namespaces)
+    except ScannerError:
+        raise
     except Exception as e:
         log.error("trivy scan failed: %s", e)
-        return []
+        raise ScannerError(f"trivy scan failed: {e}") from e
+    return parse_findings(raw)

@@ -5,9 +5,15 @@
 # delete, or exec verb anywhere below. The guarantee is enforced by the API server,
 # not by the app's good intentions or by a prompt telling the LLM to behave.
 #
-# `secrets` is get/list because Trivy and the context probes need to know a Secret
-# EXISTS and what type it is. The app never puts Secret values in a prompt — see
-# cluster.probe_secrets, which takes a pod spec and has no API client to read data with.
+# READ-ONLY IS NOT THE SAME AS HARMLESS. Say this part out loud too:
+# cluster-wide `list secrets` would let this app enumerate every Secret in the
+# cluster — including every ServiceAccount token — which is a path to cluster-admin
+# by another name. "It's read-only" would not have saved you. So secrets are
+# deliberately `get` ONLY (below): the app can fetch a Secret a scanned pod already
+# references, and cannot enumerate the rest.
+#
+# If a scan starts failing with "cannot list resource secrets", that is this rule
+# working. Fix the caller, not the rule.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -20,12 +26,16 @@ kind: ClusterRole
 metadata:
   name: kubesentinel-readonly
 rules:
+  # Secrets: get ONLY. No list. See the note at the top of this file — cluster-wide
+  # `list secrets` is an escalation path, not a read-only convenience.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
   - apiGroups: [""]
     resources:
       - pods
       - services
       - serviceaccounts
-      - secrets
       - configmaps
       - namespaces
       - nodes

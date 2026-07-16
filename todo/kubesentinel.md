@@ -224,11 +224,57 @@ This is a security tool; its own posture is part of the lesson.
 - [~] `code-review` skill on the diff — **not run**: no git repo, so there is no diff to review. Ran a manual verification pass over the security claims instead (RBAC verbs, loop termination, autoescape, probe_secrets signature — all confirmed). A spawned reviewer agent stalled and produced nothing. **Worth doing properly once this is in git.**
 - [x] `README.md` + `participant-instructions.md` (match frontdeskai doc style)
 
-### Known limitations (found during Phase 4, not fixed — MVP)
-- [ ] **`RUNS` dict never evicts.** Every scan leaks a run + its queue for the process
-  lifetime. Fine for a single-replica demo, wrong for anything else. Fix: TTL or cap.
-- [ ] **SSE assumes one client per run.** Two browsers on the same run id would each
-  consume half the events (`queue.get()` pops). Fix: fan-out or replay buffer.
+### Phase 5 — Adversarial review remediation (2026-07-17) ✅
+An adversarial review agent found 14 issues (6 HIGH), each reproduced against running
+code. It was a better review than my own pass, which checked the claims I was confident
+about rather than the risks. Fixed test-first; suite grew 38 → 55.
+
+- [x] **HIGH-1 `assess` discarded all prior results on any error.** The `return` was
+  inside the workload loop, so a transient Groq 429 on workload 2 deleted the CRITICAL
+  already found for workload 1 — while the `None` path 4 lines below deliberately did
+  the opposite. Now accumulates and continues.
+- [x] **HIGH-2 cluster unreachable → the agent confabulated.** No route guard, so
+  `assess` ran with an empty context block while the schema still demanded
+  `cited_facts` — the model duly invented them. The app silently degraded into the
+  exact "LLM guesses from scanner output" behaviour it exists to disprove. Added
+  `route_after_context`; bails to report.
+- [x] **HIGH-3 fail-open scanner.** `scanner.scan()` swallowed failures and returned
+  `[]`, which the UI rendered identically to a clean cluster. **A test asserted this
+  behaviour** — the test was wrong. Now raises `ScannerError`; ingest surfaces it.
+- [x] **HIGH-4 SSE split events between clients.** One shared queue + destructive
+  `get()` → a laptop and a projector on the same run each got half the stream, and one
+  never received the done sentinel. Now per-subscriber queues + a replay history for
+  late joiners. Verified live with two concurrent clients.
+- [x] **HIGH-5 false security claims.** `probe_secret_types` *does* hold an API client
+  and `read_namespaced_secret` returns `.data`; the docstring claimed secret values are
+  "never read". Corrected to say discipline, not architecture. **And the README cited
+  cluster-wide `list secrets` as proof of safety** — that reads every ServiceAccount
+  token in the cluster. RBAC narrowed to `get` on secrets; verified Trivy still works.
+- [x] **HIGH-6 `is_cluster_admin` matched role NAMES.** A custom ClusterRole granting
+  `*/*/*` reported False on the app's headline fact, and the `admin`/`edit` check lived
+  only in the ClusterRoleBinding loop — missing their normal RoleBinding usage. Now
+  resolves each binding to its rules. Added `has_privileged_rbac` and `unresolved_roles`
+  (unknown ≠ safe).
+- [x] **MEDIUM-9 `MAX_PROBE_ROUNDS = 2` delivered ONE probe round.** It counts assess
+  invocations. Renamed `MAX_ASSESS_ROUNDS`; diagram and README corrected.
+- [x] **MEDIUM-12 `RUNS` never evicted / LOW task GC.** Capped at `MAX_RUNS`; task
+  reference retained.
+
+### Still open from the review (not fixed)
+- [ ] **MEDIUM-7 NetworkPolicy coverage is over-generous.** `matchExpressions`-only
+  selectors and egress-only policies both report "covered: True", pushing severity down.
+- [ ] **MEDIUM-8 initContainers / projected volumes invisible.** A privileged
+  initContainer reports `privileged: False`. Textbook escape vector, missed.
+- [ ] **MEDIUM-10 probe requests are per-workload but applied to all** — N×N API calls,
+  attribution lost.
+- [ ] **MEDIUM-11 "watch the graph think" oversells the stream.** `assess` emits one
+  audit line after all its LLM calls, so the slow node shows nothing.
+- [ ] **MEDIUM-13 the `report` node's markdown is computed and discarded.** Nothing
+  reads `run["report"]`. Wire it up or delete the node.
+- [ ] **MEDIUM-14 no test that an adversarial pod name cannot skew the ranking.** The
+  README now says so rather than claiming injection is "inert".
+- [ ] **LOW: Ingress never inspected** though RBAC grants it — a workload exposed only
+  via Ingress reports `reachable_externally: False`.
 - [ ] **No auth on the dashboard.** Deliberate for the MVP; the reason the app rates
   itself MEDIUM. Do not expose it beyond a local kind cluster.
 - [ ] **`ollama-local` is untested.** Implemented, never run — the local Ollama service

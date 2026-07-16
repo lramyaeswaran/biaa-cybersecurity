@@ -54,8 +54,25 @@ def test_resource_with_no_results_is_skipped():
     assert scanner.parse_findings({"Resources": [{"Kind": "ConfigMap", "Results": None}]}) == []
 
 
-def test_scan_surfaces_trivy_failure_as_empty_findings_and_logs(caplog):
+def test_scan_raises_rather_than_failing_open(caplog):
+    """Review finding HIGH-3.
+
+    This test previously asserted the OPPOSITE — that a Trivy failure yields []. That
+    was wrong, and dangerously so: an empty list is indistinguishable from a clean
+    cluster, so a crashed scanner rendered as a green result. For a security tool that
+    is the worst available failure mode. Fail closed and let the caller say so.
+    """
     with patch.object(scanner, "run_trivy", side_effect=RuntimeError("trivy exploded")):
-        findings = scanner.scan(["vuln-demo"])
-    assert findings == []
-    assert "trivy exploded" in caplog.text
+        with pytest.raises(scanner.ScannerError, match="trivy exploded"):
+            scanner.scan(["vuln-demo"])
+
+
+def test_scan_returns_findings_on_success(raw_trivy):
+    with patch.object(scanner, "run_trivy", return_value=raw_trivy):
+        assert len(scanner.scan(["vuln-demo"])) == 19
+
+
+def test_clean_scan_returns_empty_list_without_raising():
+    """A genuinely clean namespace is not an error - it must stay distinguishable."""
+    with patch.object(scanner, "run_trivy", return_value={"Resources": []}):
+        assert scanner.scan(["empty-ns"]) == []

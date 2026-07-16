@@ -66,6 +66,63 @@ async def test_events_for_unknown_run_is_404(client):
     assert r.status_code == 404
 
 
+# --- Review finding HIGH-4: every client must see the whole stream ---
+
+
+async def _collect(run_id, limit=10):
+    """Drain the SSE generator the way a browser would."""
+    out = []
+    async for evt in app_module._subscribe(run_id):
+        out.append(evt)
+        if evt["event"] == "done" or len(out) >= limit:
+            break
+    return out
+
+
+async def test_two_clients_on_one_run_each_receive_every_event():
+    """A laptop and a projector on the same run. Previously each got alternating
+    halves, because all clients shared one queue and get() is destructive."""
+    import asyncio
+
+    run = app_module._new_run("r1", ["vuln-demo"])
+    a = asyncio.create_task(_collect("r1"))
+    b = asyncio.create_task(_collect("r1"))
+    await asyncio.sleep(0)  # let both subscribe
+
+    for i in range(3):
+        app_module._publish(run, {"node": "assess", "message": f"msg{i}"})
+    app_module._finish(run)
+
+    got_a, got_b = await a, await b
+    msgs_a = [e["data"] for e in got_a if e["event"] == "step"]
+    msgs_b = [e["data"] for e in got_b if e["event"] == "step"]
+
+    assert msgs_a == msgs_b, "clients received different halves of the stream"
+    assert len(msgs_a) == 3
+    assert got_a[-1]["event"] == "done" and got_b[-1]["event"] == "done", "a client never got the done sentinel"
+
+
+async def test_client_connecting_late_still_gets_earlier_events():
+    """POST /scan starts the graph immediately; the browser subscribes a moment later.
+    Without replay, everything emitted in that gap is lost."""
+    run = app_module._new_run("r2", ["vuln-demo"])
+    app_module._publish(run, {"node": "ingest", "message": "22 findings"})
+    app_module._publish(run, {"node": "gather_context", "message": "probed 2"})
+    app_module._finish(run)
+
+    got = await _collect("r2")
+    msgs = [e["data"] for e in got if e["event"] == "step"]
+    assert len(msgs) == 2, "late subscriber lost the events emitted before it connected"
+    assert got[-1]["event"] == "done"
+
+
+async def test_finished_run_is_evicted_eventually():
+    """Review finding MEDIUM-12: RUNS never shrank. A closed tab leaked a run forever."""
+    for i in range(app_module.MAX_RUNS + 3):
+        app_module._new_run(f"leak{i}", ["ns"])
+    assert len(app_module.RUNS) <= app_module.MAX_RUNS
+
+
 async def test_report_for_unknown_run_is_404(client):
     r = await client.get("/runs/does-not-exist/report")
     assert r.status_code == 404

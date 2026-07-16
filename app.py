@@ -33,10 +33,84 @@ log = logging.getLogger("kubesentinel.app")
 
 DEFAULT_NAMESPACES = os.getenv("SCAN_NAMESPACES", "vuln-demo,safe-demo")
 
-# run_id -> {namespaces, queue, done, assessments, report, error}
+# run_id -> run dict. Insertion-ordered, capped: see _evict.
 RUNS: dict[str, dict] = {}
+MAX_RUNS = 50
 
 GRAPH = build_graph()
+
+
+# --- Run bookkeeping -------------------------------------------------------
+#
+# Each subscriber gets its OWN queue, and every event is also kept in `history`.
+# Both halves are load-bearing:
+#   * one shared queue meant `queue.get()` handed alternating events to each client,
+#     so a laptop and a projector on the same run each saw half the stream and one
+#     never got the done sentinel;
+#   * without `history`, a browser that subscribes a moment after POST /scan misses
+#     everything emitted in the gap.
+
+
+def _new_run(run_id: str, namespaces: list[str]) -> dict:
+    run = {
+        "id": run_id,
+        "namespaces": namespaces,
+        "history": [],
+        "subscribers": [],
+        "done": False,
+        "assessments": [],
+        "report": "",
+        "error": "",
+        "task": None,
+    }
+    RUNS[run_id] = run
+    _evict()
+    return run
+
+
+def _evict() -> None:
+    """Drop the oldest runs. Nothing else ever removed them, so a closed tab (or a
+    bot POSTing /scan) leaked a run plus its queue for the process lifetime."""
+    while len(RUNS) > MAX_RUNS:
+        RUNS.pop(next(iter(RUNS)))
+
+
+def _publish(run: dict, item: dict) -> None:
+    run["history"].append(item)
+    for q in run["subscribers"]:
+        q.put_nowait(item)
+
+
+def _finish(run: dict) -> None:
+    run["done"] = True
+    for q in run["subscribers"]:
+        q.put_nowait(None)  # sentinel: stream complete
+
+
+async def _subscribe(run_id: str):
+    """Yield the whole stream for one client: replay, then live."""
+    run = RUNS[run_id]
+    q: asyncio.Queue = asyncio.Queue()
+
+    # No awaits in this block, so replay-then-register is atomic under asyncio and
+    # cannot drop or duplicate an event that lands mid-subscribe.
+    for item in run["history"]:
+        q.put_nowait(item)
+    if run["done"]:
+        q.put_nowait(None)
+    else:
+        run["subscribers"].append(q)
+
+    try:
+        while True:
+            item = await q.get()
+            if item is None:
+                yield {"event": "done", "data": run_id}
+                return
+            yield {"event": "step", "data": f"{item['node']}|{item['message']}"}
+    finally:
+        if q in run["subscribers"]:
+            run["subscribers"].remove(q)
 
 
 @asynccontextmanager
@@ -74,22 +148,16 @@ async def health():
 async def start_scan(request: Request, namespaces: str = Form(...)):
     ns_list = [n.strip() for n in namespaces.split(",") if n.strip()]
     run_id = uuid.uuid4().hex[:12]
-    RUNS[run_id] = {
-        "namespaces": ns_list,
-        "queue": asyncio.Queue(),
-        "done": False,
-        "assessments": [],
-        "report": "",
-        "error": "",
-    }
-    asyncio.create_task(_execute_scan(run_id, ns_list))
+    run = _new_run(run_id, ns_list)
+    # Keep a reference: the event loop only holds a weak one, so a bare create_task
+    # can be garbage-collected mid-scan.
+    run["task"] = asyncio.create_task(_execute_scan(run_id, ns_list))
     return templates.TemplateResponse(request, "_run.html", {"run_id": run_id, "namespaces": ns_list})
 
 
 async def _execute_scan(run_id: str, namespaces: list[str]) -> None:
-    """Drive the graph, pushing each node transition onto the run's queue."""
+    """Drive the graph, publishing each node transition to every subscriber."""
     run = RUNS[run_id]
-    queue: asyncio.Queue = run["queue"]
     compiled = GRAPH.compile()
     initial = {
         "namespaces": namespaces,
@@ -101,7 +169,7 @@ async def _execute_scan(run_id: str, namespaces: list[str]) -> None:
         async for chunk in compiled.astream(initial, stream_mode="updates"):
             for node, update in chunk.items():
                 for line in (update.get("audit") or []):
-                    await queue.put({"node": node, "message": line})
+                    _publish(run, {"node": node, "message": line})
                 if update.get("assessments"):
                     run["assessments"] = update["assessments"]
                 if update.get("report"):
@@ -111,28 +179,16 @@ async def _execute_scan(run_id: str, namespaces: list[str]) -> None:
     except Exception as e:
         log.exception("scan %s failed", run_id)
         run["error"] = str(e)
-        await queue.put({"node": "error", "message": str(e)})
+        _publish(run, {"node": "error", "message": str(e)})
     finally:
-        run["done"] = True
-        await queue.put(None)  # sentinel: stream complete
+        _finish(run)
 
 
 @app.get("/runs/{run_id}/events")
 async def events(run_id: str):
-    run = RUNS.get(run_id)
-    if run is None:
+    if run_id not in RUNS:
         raise HTTPException(status_code=404, detail="unknown run")
-
-    async def stream():
-        queue: asyncio.Queue = run["queue"]
-        while True:
-            item = await queue.get()
-            if item is None:
-                yield {"event": "done", "data": run_id}
-                return
-            yield {"event": "step", "data": f"{item['node']}|{item['message']}"}
-
-    return EventSourceResponse(stream())
+    return EventSourceResponse(_subscribe(run_id))
 
 
 @app.get("/runs/{run_id}/report", response_class=HTMLResponse)
