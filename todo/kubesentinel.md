@@ -274,6 +274,28 @@ Both failed in the *unsafe* direction, which is the wrong direction for this too
   matchExpressions selector matches (unknown ≠ covered). **Verified live**: safe-demo's
   default-deny still registers covered, so the LOW ranking is unchanged.
 
+### Phase 7 — Codespaces verification (2026-07-17)
+Asked "will this work on Codespaces?" and tested rather than assumed. Found a bug that
+would have broken every participant's Codespace on first open.
+
+- [x] **`sysctl -w fs.inotify.*` is PERMISSION DENIED inside a container**, sudo or not
+  — the sysctl belongs to the host, and a Codespace is a container. Both
+  `post-create.sh` and `setup-cluster.sh` ran it under `set -euo pipefail`, so the
+  bootstrap would have **aborted on first open**. (`setup-cluster.sh` gated on
+  `sudo -n true`, which *succeeds* in a Codespace — so the gate did not save it.)
+  Now best-effort: warn and continue. Verified in the devcontainer base image.
+- [x] **kind in docker-in-docker works** — verified by proxy: dockerd inside a
+  container, kind 0.32, cluster created, node Ready, extraPortMappings accepted.
+  This was the risk flagged in Phase 0 from web reports of docker 27+ IPv6 breakage;
+  it did not reproduce.
+- [x] **`pip install --user` is not PEP 668-blocked** on the devcontainer python image.
+- [x] Docs use `python -m uvicorn`, not bare `uvicorn` — `pip install --user` puts
+  console scripts in `~/.local/bin`, which is not reliably on PATH.
+- [~] **End-to-end in a REAL Codespace: NOT TESTED.** Everything above is a local
+  proxy. The README says so plainly rather than implying a green tick. The honest
+  residual risks are memory pressure on a 4-core box and Codespaces' own
+  docker-in-docker feature version.
+
 ### Still open from the review (not fixed)
 - [ ] **`probe_workload_facts` still ignores hostPID / hostNetwork / capabilities.add.**
   Now stated in the docstring rather than implied away — a clean result means "not

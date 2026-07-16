@@ -93,9 +93,34 @@ bash k8s/deploy.sh            # secret from .env, read-only RBAC, deploy
 
 Then open **http://localhost:8080** and scan `vuln-demo,safe-demo`.
 
-In a **GitHub Codespace** the same four commands work — port 8080 is forwarded
-automatically and kept **private** (the dashboard has no auth and reports exactly
-where your cluster is weakest; do not make it public).
+### GitHub Codespaces
+
+The same four commands. Port 8080 is forwarded automatically and kept **private** —
+the dashboard has no auth and reports exactly where your cluster is weakest, so do
+not make it public.
+
+Open the Codespace, wait for `postCreate` to finish, put your `GROQ_API_KEY` in
+`.env`, then run the four commands above. Pick a **4-core** machine or larger
+(`hostRequirements` in `.devcontainer/devcontainer.json` enforces this) — the kind
+control plane plus the demo workloads plus an 804MB image need the headroom.
+
+**What is actually verified, and what is not.** Honesty matters more than a green
+checkmark here, because you will be running this in front of a room:
+
+| | Status |
+|---|---|
+| kind creates a cluster inside docker-in-docker | ✅ verified (dind, kind 0.32, node Ready) |
+| `sysctl -w fs.inotify.*` inside a container | ❌ **permission denied** — the sysctl is the host's |
+| Scripts survive that denial instead of aborting | ✅ verified |
+| `pip install --user` (no PEP 668 block) | ✅ verified on the devcontainer image |
+| End-to-end in a **real** Codespace | ⚠️ **not tested** — verified by proxy only |
+
+The inotify one is the interesting caveat. On a laptop, `setup-cluster.sh` raises the
+limit. In a Codespace it **cannot** — that sysctl belongs to the host — so the script
+warns and continues, because a single kind cluster normally fits inside the default.
+If the API server never starts and kubeadm says `context deadline exceeded`, that is
+inotify exhaustion, and the fix is to delete other kind clusters (`kind get clusters`)
+rather than to raise the limit.
 
 Run the tests: `pytest` (61 tests, no cluster or API key needed — everything is mocked).
 
@@ -113,8 +138,11 @@ Then, against the same kind cluster (it reads your kubeconfig):
 ```bash
 set -a; source .env; set +a
 kubectl config use-context kind-kubesentinel
-uvicorn app:app --reload --port 8001
+python -m uvicorn app:app --reload --port 8001
 ```
+
+(`python -m uvicorn` rather than bare `uvicorn`: with `pip install --user`, the console
+script lands in `~/.local/bin`, which is not always on PATH. The module form always works.)
 
 `--reload` picks up edits to `templates/`, `static/` and the Python modules, so the
 UI loop is: edit → save → refresh. **Use a port other than 8000 if you also run the

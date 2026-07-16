@@ -17,13 +17,24 @@ trivy --version | head -1
 
 echo "==> Installing Python dependencies"
 pip install --user -r requirements.txt
+# Console scripts land in ~/.local/bin, which is not reliably on PATH. Use the module
+# form everywhere (python -m uvicorn / python -m pytest) rather than depending on it.
+python -c "import uvicorn, fastapi, langgraph, kubernetes" \
+  && echo "    dependencies importable"
 
-echo "==> Raising inotify limits for kind"
-# Codespaces default to 128 instances; a kind control plane needs far more headroom.
-# Without this the API server never bootstraps and kubeadm reports a misleading
-# "context deadline exceeded".
-sudo sysctl -w fs.inotify.max_user_instances=512 >/dev/null
-sudo sysctl -w fs.inotify.max_user_watches=524288 >/dev/null
+echo "==> Trying to raise inotify limits for kind"
+# `sysctl -w fs.inotify.*` is PERMISSION DENIED inside a container even as root —
+# the sysctl belongs to the host, and a Codespace is a container. So this is
+# best-effort and MUST NOT abort: with `set -e`, a bare `sudo sysctl -w` here would
+# fail the whole postCreate and leave you with a broken Codespace.
+if sudo sysctl -w fs.inotify.max_user_instances=512 >/dev/null 2>&1; then
+  sudo sysctl -w fs.inotify.max_user_watches=524288 >/dev/null 2>&1 || true
+  echo "    raised"
+else
+  echo "    not permitted here (normal in a Codespace — the sysctl is the host's)."
+  echo "    Current: $(sysctl -n fs.inotify.max_user_instances 2>/dev/null || echo '?') instances."
+  echo "    One kind cluster usually fits. k8s/setup-cluster.sh will tell you if not."
+fi
 
 if [ ! -f .env ]; then
   cp .env.example .env

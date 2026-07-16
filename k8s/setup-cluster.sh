@@ -59,28 +59,37 @@ else
 fi
 
 # --- inotify headroom ---
+#
+# Two different worlds here, and the script must survive both:
+#   * A laptop: sysctl is writable, and raising it is the documented kind fix.
+#   * A Codespace / any container: `sysctl -w fs.inotify.*` is PERMISSION DENIED
+#     regardless of sudo, because the sysctl belongs to the host. You inherit
+#     whatever the host has and cannot change it.
+# So a failed write is NOT fatal — it is the normal case in a container, and a
+# single kind cluster usually fits inside the default anyway. Warn and continue;
+# the cluster create below is the real test.
 WANT_INSTANCES=512
 WANT_WATCHES=524288
-HAVE_INSTANCES="$(sysctl -n fs.inotify.max_user_instances)"
-if [ "$HAVE_INSTANCES" -lt "$WANT_INSTANCES" ]; then
-  echo "    inotify instances = $HAVE_INSTANCES (too low; kind needs headroom)"
-  if sudo -n true 2>/dev/null; then
-    sudo sysctl -w fs.inotify.max_user_instances=$WANT_INSTANCES >/dev/null
-    sudo sysctl -w fs.inotify.max_user_watches=$WANT_WATCHES >/dev/null
+HAVE_INSTANCES="$(sysctl -n fs.inotify.max_user_instances 2>/dev/null || echo 0)"
+
+if [ "$HAVE_INSTANCES" -ge "$WANT_INSTANCES" ]; then
+  echo "    inotify instances = $HAVE_INSTANCES (ok)"
+else
+  echo "    inotify instances = $HAVE_INSTANCES (low — kind wants ~$WANT_INSTANCES)"
+  raised=false
+  if sudo -n sysctl -w fs.inotify.max_user_instances=$WANT_INSTANCES >/dev/null 2>&1; then
+    sudo -n sysctl -w fs.inotify.max_user_watches=$WANT_WATCHES >/dev/null 2>&1 || true
+    raised=true
+  fi
+  if [ "$raised" = true ]; then
     echo "    raised to $WANT_INSTANCES / $WANT_WATCHES (runtime only — reverts on reboot)"
   else
-    echo ""
-    echo "ERROR: need sudo to raise the inotify limit, and passwordless sudo is unavailable."
-    echo "    Run this yourself, then re-run this script:"
-    echo "      sudo sysctl -w fs.inotify.max_user_instances=$WANT_INSTANCES"
-    echo "      sudo sysctl -w fs.inotify.max_user_watches=$WANT_WATCHES"
-    echo ""
-    echo "    Without this, the cluster's API server will fail to start and kubeadm"
-    echo "    will report a misleading 'context deadline exceeded'."
-    exit 1
+    echo "    could not raise it (expected inside a container/Codespace — the sysctl"
+    echo "    belongs to the host). Continuing: one cluster often fits regardless."
+    echo "    If the API server never starts and kubeadm says 'context deadline"
+    echo "    exceeded', THIS is why — free up inotify by deleting other kind clusters:"
+    echo "      kind get clusters"
   fi
-else
-  echo "    inotify instances = $HAVE_INSTANCES (ok)"
 fi
 
 # --- Cluster ---
