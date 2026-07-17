@@ -35,8 +35,8 @@
 
   "hostRequirements": {
     // kind's control plane plus the demo workloads need real headroom.
-    "cpus": 4,
-    "memory": "8gb",
+    "cpus": 2,
+    "memory": "4gb",
     "storage": "32gb"
   },
 
